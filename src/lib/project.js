@@ -8,7 +8,6 @@ import path from 'path';
 import shell from 'shelljs';
 import url from 'url';
 import util from 'util';
-import customNextIndex from '../lib/ui/next/customNextIndex.js';
 import customNuxtIndex from '../lib/ui/nuxt/customNuxtIndex.js';
 import nuxtGradientBackground from '../lib/ui/nuxt/nuxtGradientBackground.js';
 import customLayoutSvelte from '../lib/ui/svelte/customLayoutSvelte.js';
@@ -20,6 +19,16 @@ const __filename = url.fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const shellExec = util.promisify(shell.exec);
 const isWindows = process.platform === 'win32';
+
+import {
+  getCustomNextIndex,
+  getCustomNextLayout,
+  getNextConfig,
+  getTsConfig,
+} from './config/config.js';
+
+//! Remove this line when you push your changes
+// project('test', 'next');
 
 /**
  * Create a new zkApp project with recommended dir structure, Prettier config,
@@ -383,7 +392,8 @@ async function scaffoldNext(projectName) {
     prefix: (state) => prefix(state),
   });
 
-  let useGHPages;
+  let useGHPages, useTypescript, useSrcFolder, useAppDir;
+
   try {
     useGHPages = (await ghPagesPrompt.run()) == 'yes';
   } catch (err) {
@@ -394,12 +404,10 @@ async function scaffoldNext(projectName) {
   // set the project name and default flags
   // https://nextjs.org/docs/api-reference/create-next-app#options
   let args = [
-    'create-next-app@13.4.1',
+    'create-next-app@14.2.2',
     'ui',
     '--use-npm',
-    '--src-dir',
     '--import-alias "@/*"',
-    '--no-app',
   ];
 
   spawnSync('npx', args, {
@@ -410,79 +418,80 @@ async function scaffoldNext(projectName) {
   shell.rm('-rf', path.join('ui', '.git')); // Remove NextJS' .git; we will init .git in our monorepo's root.
   // Read in the NextJS config file and add the middleware.
 
-  let useTypescript = true;
   try {
     // Determine if generated project is a ts project by looking for a tsconfig file
-    fs.readFileSync(path.join('ui', 'tsconfig.json'));
+    useTypescript = fs.existsSync(path.join('ui', 'tsconfig.json'));
   } catch (err) {
     if (err.code !== 'ENOENT') {
       console.error(err);
     }
-    useTypescript = false;
   }
 
-  const nextConfig = fs.readFileSync(path.join('ui', 'next.config.js'), 'utf8');
-
-  let newNextConfig = nextConfig.replace(
-    /^}(.*?)$/gm, // Search for the last '}' in the file.
-    `
-
-  webpack(config) {
-    config.resolve.alias = {
-      ...config.resolve.alias,
-      o1js: require('path').resolve('node_modules/o1js')
-    };
-    config.experiments = { ...config.experiments, topLevelAwait: true };
-    return config;
-  },
-  // To enable o1js for the web, we must set the COOP and COEP headers.
-  // See here for more information: https://docs.minaprotocol.com/zkapps/how-to-write-a-zkapp-ui#enabling-coop-and-coep-headers
-  async headers() {
-    return [
-      {
-        source: '/(.*)',
-        headers: [
-          {
-            key: 'Cross-Origin-Opener-Policy',
-            value: 'same-origin',
-          },
-          {
-            key: 'Cross-Origin-Embedder-Policy',
-            value: 'require-corp',
-          },
-        ],
-      },
-    ];
+  // Check if the project created with src Directory
+  try {
+    useSrcFolder = fs.existsSync(path.join('ui', 'src'));
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      console.error(err);
+    }
   }
-};`
+
+  // Check if the project created with App Directory
+  try {
+    useAppDir = fs.existsSync(
+      path.join('ui', useSrcFolder ? 'src/app' : 'app')
+    );
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      console.error(err);
+    }
+  }
+
+  // Determine path to write any data to based on the project structure
+  const dynamicPath = useSrcFolder
+    ? useAppDir
+      ? 'src/app'
+      : 'src/pages'
+    : useAppDir
+      ? 'app'
+      : 'pages';
+
+  // Write the custom NextJS config file
+  fs.writeFileSync(
+    path.join('ui', 'next.config.mjs'),
+    getNextConfig(useAppDir)
   );
 
-  // This prevents usEffect from running twice on initial mount.
-  newNextConfig = newNextConfig.replace(
-    'reactStrictMode: true',
-    'reactStrictMode: false'
-  );
+  const indexFileName = useAppDir
+    ? `page.${useTypescript ? 'tsx' : 'js'}`
+    : `index.${useTypescript ? 'tsx' : 'js'}`;
 
-  fs.writeFileSync(path.join('ui', 'next.config.js'), newNextConfig);
-
-  const indexFileName = useTypescript ? 'index.tsx' : 'index.js';
+  const appLayoutFileName = useTypescript ? 'layout.tsx' : 'layout.js';
 
   fs.writeFileSync(
-    path.join('ui', 'src/pages', indexFileName),
-    customNextIndex,
+    path.join('ui', dynamicPath, indexFileName),
+    getCustomNextIndex(useSrcFolder, useAppDir),
     'utf8'
   );
+
+  if (useAppDir) {
+    fs.writeFileSync(
+      path.join('ui', dynamicPath, appLayoutFileName),
+      getCustomNextLayout(),
+      'utf8'
+    );
+  }
 
   // Adds landing page components directory and files to NextJS project.
   fs.copySync(
     path.join(__dirname, 'ui', 'next', 'components'),
-    path.join('ui', 'src', 'components')
+    path.join('ui', useSrcFolder ? 'src' : '', 'components')
   );
 
   // Adds landing page style directory and files to NextJS project.
   fs.copySync(
     path.join(__dirname, 'ui', 'next', 'styles'),
-    path.join('ui', 'src', 'styles')
+    path.join('ui', useSrcFolder ? 'src' : '', 'styles')
   );
 
   // Removes create-next-app assets
@@ -491,44 +500,23 @@ async function scaffoldNext(projectName) {
   // Adds landing page assets directory and files to NextJS project.
   fs.copySync(
     path.join(__dirname, 'ui', 'next', 'assets'),
-    path.join('ui', 'public', 'assets')
+    path.join('ui', 'public')
   );
 
-  const tsconfig = `
-    {
-    "compilerOptions": {
-        "target": "es2020",
-        "module": "esnext",
-        "lib": ["dom", "dom.iterable","esnext"],
-        "strict": true,
-        "strictPropertyInitialization": false, // to enable generic constructors, e.g. on CircuitValue
-        "skipLibCheck": true,
-        "forceConsistentCasingInFileNames": true,
-        "esModuleInterop": true,
-        "moduleResolution": "node",
-        "experimentalDecorators": true,
-        "emitDecoratorMetadata": true,
-        "allowJs": true,
-        "declaration": true,
-        "sourceMap": true,
-        "noFallthroughCasesInSwitch": true,
-        "allowSyntheticDefaultImports": true,
-        "isolatedModules": true,
-        "noEmit": true,
-        "incremental": true,
-        "resolveJsonModule": true,
-        "jsx": "preserve",
-        "paths": {
-          "@/*": ["./src/*"]
-    }
-      },
-    "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],
-    "exclude": ["node_modules"]
-    }
-  `;
+  // Change favicon location
+  if (useAppDir) {
+    fs.copySync(
+      path.join(__dirname, 'ui', 'next', 'assets', 'favicon.ico'),
+      path.join('ui', dynamicPath, 'favicon.ico')
+    );
+    fs.removeSync(path.join('ui', 'public', 'favicon.ico'));
+    // We locate the style files in the ../styles directory and imported as well
+    fs.removeSync(path.join('ui', dynamicPath, 'globals.css'));
+    fs.removeSync(path.join('ui', dynamicPath, 'page.module.css'));
+  }
 
   if (useTypescript) {
-    fs.writeFileSync(path.join('ui', 'tsconfig.json'), tsconfig);
+    fs.writeFileSync(path.join('ui', 'tsconfig.json'), getTsConfig(useAppDir));
 
     // Add a script to the package.json
     let x = fs.readJsonSync(path.join('ui', 'package.json'));
@@ -551,33 +539,33 @@ async function scaffoldNext(projectName) {
     let newNextConfig = nextConfig.replace(
       '  }\n};',
       `  },
-  images: {
-    unoptimized: true,
-  },
-  output: 'export',
-  /* Used to serve the Next.js app from a subdirectory (the GitHub repo name) and 
-   * assetPrefix is used to serve assets (JS, CSS, images, etc.) from that subdirectory 
-   * when deployed to GitHub Pages. The assetPrefix needs to be added manually to any assets
-   * if they're not loaded by Next.js' automatic handling (for example, in CSS files or in a <img> element). 
-   * The 'ghp-postbuild.js' script in this project prepends the repo name to asset urls in the built css files 
-   * after runing 'npm run deploy'.
-   */
-  basePath: process.env.NODE_ENV === 'production' ? '/${projectName}' : '', // update if your repo name changes for 'npm run deploy' to work successfully
-  assetPrefix: process.env.NODE_ENV === 'production' ? '/${projectName}/' : '', // update if your repo name changes for 'npm run deploy' to work successfully
-};`
+    images: {
+      unoptimized: true,
+    },
+    output: 'export',
+    /* Used to serve the Next.js app from a subdirectory (the GitHub repo name) and
+     * assetPrefix is used to serve assets (JS, CSS, images, etc.) from that subdirectory
+     * when deployed to GitHub Pages. The assetPrefix needs to be added manually to any assets
+     * if they're not loaded by Next.js' automatic handling (for example, in CSS files or in a <img> element).
+     * The 'ghp-postbuild.js' script in this project prepends the repo name to asset urls in the built css files
+     * after runing 'npm run deploy'.
+     */
+    basePath: process.env.NODE_ENV === 'production' ? '/${projectName}' : '', // update if your repo name changes for 'npm run deploy' to work successfully
+    assetPrefix: process.env.NODE_ENV === 'production' ? '/${projectName}/' : '', // update if your repo name changes for 'npm run deploy' to work successfully
+  };`
     );
 
     newNextConfig = newNextConfig.replace(
       'return config;',
       `config.optimization.minimizer = [];
-    return config;`
+      return config;`
     );
 
     // update papage extensions
     newNextConfig = newNextConfig.replace(
       'reactStrictMode: false,',
       `reactStrictMode: false,
-  pageExtensions: ['page.tsx', 'page.ts', 'page.jsx', 'page.js'],`
+    pageExtensions: ['page.tsx', 'page.ts', 'page.jsx', 'page.js'],`
     );
 
     fs.writeFileSync(path.join('ui', 'next.config.js'), newNextConfig);
@@ -638,7 +626,7 @@ async function scaffoldNext(projectName) {
       'export default function',
       `import './reactCOIServiceWorker';
 
-export default function`
+  export default function`
     );
     fs.writeFileSync(
       path.join('ui', 'src', 'pages', appPagesFileName),
@@ -648,18 +636,18 @@ export default function`
     fs.writeFileSync(
       path.join('ui', 'src', 'pages', reactCOIServiceWorkerFileName),
       `
-export {}
+  export {}
 
-function loadCOIServiceWorker() {
-  if (typeof window !== 'undefined' && window.location.hostname != 'localhost') {
-    const coi = window.document.createElement('script');
-    coi.setAttribute('src','/${projectName}/coi-serviceworker.min.js'); // update if your repo name changes for npm run deploy to work successfully
-    window.document.head.appendChild(coi);
+  function loadCOIServiceWorker() {
+    if (typeof window !== 'undefined' && window.location.hostname != 'localhost') {
+      const coi = window.document.createElement('script');
+      coi.setAttribute('src','/${projectName}/coi-serviceworker.min.js'); // update if your repo name changes for npm run deploy to work successfully
+      window.document.head.appendChild(coi);
+    }
   }
-}
 
-loadCOIServiceWorker();
-`
+  loadCOIServiceWorker();
+  `
     );
 
     let ghpPostBuildScript = fs.readFileSync(
